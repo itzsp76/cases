@@ -1,10 +1,10 @@
 // Middleware JWT — protege rotas /api/admin/*
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  console.error('❌ JWT_SECRET não definido no .env');
-  process.exit(1);
+function getSecret() {
+  const s = process.env.JWT_SECRET;
+  if (!s) throw new Error('JWT_SECRET não definido no ambiente');
+  return s;
 }
 
 function requireAuth(req, res, next) {
@@ -12,16 +12,15 @@ function requireAuth(req, res, next) {
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'Token ausente' });
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    req.user = payload;
+    req.user = jwt.verify(token, getSecret());
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ error: 'Token inválido ou expirado' });
   }
 }
 
 function signToken(payload, expiresIn = process.env.JWT_EXPIRY || '24h') {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn });
+  return jwt.sign(payload, getSecret(), { expiresIn });
 }
 
 module.exports = { requireAuth, signToken };

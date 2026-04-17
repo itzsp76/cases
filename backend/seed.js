@@ -1,8 +1,8 @@
 // ═══════════════════════════════════════════════════════
-// SEED — popula o banco com os 115 cases iniciais da ITZ
+// SEED / MIGRATE — cria schema e popula cases iniciais no Turso
 // ═══════════════════════════════════════════════════════
-// Uso:   node seed.js           (popula apenas se tabela estiver vazia)
-// Uso:   node seed.js --force   (limpa e repopula — CUIDADO em produção)
+// Uso:   npm run migrate              (popula apenas se tabela estiver vazia)
+// Uso:   npm run migrate:force        (limpa e repopula — CUIDADO)
 // ═══════════════════════════════════════════════════════
 require('dotenv').config();
 const fs = require('fs');
@@ -11,8 +11,11 @@ const db = require('./db');
 
 const force = process.argv.includes('--force');
 
-function run() {
-  const existing = db._stmts.countCases.get().total;
+async function run() {
+  await db.ensureSchema();
+  console.log('✅ Schema garantido.');
+
+  const existing = await db.countCases();
 
   if (existing > 0 && !force) {
     console.log(`ℹ️  Tabela "cases" já tem ${existing} registros. Use --force para limpar e repopular.`);
@@ -21,35 +24,41 @@ function run() {
 
   if (force && existing > 0) {
     console.log(`⚠️  Limpando ${existing} cases existentes...`);
-    db.db.prepare('DELETE FROM cases').run();
+    await db.client.execute('DELETE FROM cases');
   }
 
   const jsonPath = path.join(__dirname, 'data', 'initial-cases.json');
   if (!fs.existsSync(jsonPath)) {
-    console.error(`❌ Arquivo de dados não encontrado: ${jsonPath}`);
+    console.error(`❌ Arquivo não encontrado: ${jsonPath}`);
     process.exit(1);
   }
 
   const cases = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
   console.log(`📦 Importando ${cases.length} cases...`);
 
-  const tx = db.db.transaction((items) => {
-    for (const c of items) {
-      db.createCase({
-        niche:       c.niche,
-        name:        c.name,
-        videoUrl:    c.videoUrl,
-        description: c.description || '',
-        featured:    !!c.featured,
-      });
-    }
-  });
-  tx(cases);
+  // Batch em lotes de 50 (limite conservador para o Turso)
+  const BATCH = 50;
+  for (let i = 0; i < cases.length; i += BATCH) {
+    const slice = cases.slice(i, i + BATCH);
+    const stmts = slice.map(c => ({
+      sql: `INSERT INTO cases (niche, name, video_url, description, featured)
+            VALUES (?, ?, ?, ?, ?)`,
+      args: [
+        c.niche,
+        c.name,
+        c.videoUrl || '',
+        c.description || '',
+        c.featured ? 1 : 0,
+      ],
+    }));
+    await db.client.batch(stmts, 'write');
+    console.log(`   → ${Math.min(i + BATCH, cases.length)}/${cases.length}`);
+  }
 
-  // Settings iniciais (se não existirem)
-  const currentSettings = db.getAllSettings();
+  // Settings padrão (apenas se não existirem)
+  const currentSettings = await db.getAllSettings();
   if (!currentSettings.waPhone) {
-    db.setManySettings({
+    await db.setManySettings({
       waPhone: '5511999999999',
       waMsg: 'Olá! Vi os cases de sucesso da ITZ e quero saber mais!',
       heroTitle: '',
@@ -67,15 +76,13 @@ function run() {
     console.log('✅ Settings padrão criadas.');
   }
 
-  const total = db._stmts.countCases.get().total;
-  const niches = db._stmts.countNiches.get().total;
-  console.log(`✅ Concluído: ${total} cases em ${niches} segmentos.`);
+  const total = await db.countCases();
+  console.log(`✅ Concluído: ${total} cases no banco.`);
 }
 
-try {
-  run();
-  process.exit(0);
-} catch (err) {
-  console.error('❌ Erro no seed:', err);
-  process.exit(1);
-}
+run()
+  .then(() => process.exit(0))
+  .catch(err => {
+    console.error('❌ Erro no seed:', err);
+    process.exit(1);
+  });

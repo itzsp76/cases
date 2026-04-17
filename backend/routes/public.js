@@ -6,95 +6,103 @@ const db = require('../db');
 const router = express.Router();
 
 // ─────────────────────────────────────────────
-// GET /api/cases — lista todos os cases
+// GET /api/cases
 // ─────────────────────────────────────────────
-router.get('/cases', (req, res) => {
-  const cases = db.listCases();
-  res.json({ total: cases.length, items: cases });
+router.get('/cases', async (req, res, next) => {
+  try {
+    const cases = await db.listCases();
+    res.json({ total: cases.length, items: cases });
+  } catch (err) { next(err); }
 });
 
 // ─────────────────────────────────────────────
-// GET /api/cases/:id — detalhe do case + incrementa view
+// GET /api/cases/:id — detalhe + incrementa view
 // ─────────────────────────────────────────────
-router.get('/cases/:id', (req, res) => {
-  const id = parseInt(req.params.id, 10);
-  if (!id) return res.status(400).json({ error: 'ID inválido' });
-  const c = db.getCase(id);
-  if (!c) return res.status(404).json({ error: 'Case não encontrado' });
-  db.incrementViews(id);
-  res.json(c);
+router.get('/cases/:id', async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'ID inválido' });
+    const c = await db.getCase(id);
+    if (!c) return res.status(404).json({ error: 'Case não encontrado' });
+    db.incrementViews(id).catch(() => {}); // fire-and-forget
+    res.json(c);
+  } catch (err) { next(err); }
 });
 
 // ─────────────────────────────────────────────
-// POST /api/cases/:id/view — incrementa view sem retornar dados
-// (usado quando o modal abre, para métricas precisas)
+// POST /api/cases/:id/view
 // ─────────────────────────────────────────────
-router.post('/cases/:id/view', (req, res) => {
-  const id = parseInt(req.params.id, 10);
-  if (!id) return res.status(400).json({ error: 'ID inválido' });
-  const ok = db.incrementViews(id);
-  res.json({ ok });
+router.post('/cases/:id/view', async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'ID inválido' });
+    const ok = await db.incrementViews(id);
+    res.json({ ok });
+  } catch (err) { next(err); }
 });
 
 // ─────────────────────────────────────────────
-// POST /api/leads — submissão pública de lead (com rate limit)
+// POST /api/leads — rate-limit in-memory (imperfeito em serverless,
+// mas serve como freio básico; proteção forte fica a cargo do Vercel WAF)
 // ─────────────────────────────────────────────
 const leadLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,    // 10 min
-  max: 5,                       // 5 leads por IP
+  windowMs: 10 * 60 * 1000,
+  max: 5,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Muitas submissões. Aguarde alguns minutos.' },
 });
 
-router.post('/leads', leadLimiter, async (req, res) => {
-  const { name, phone, niche, caseId, caseName, message } = req.body || {};
-  if (!name || !phone) {
-    return res.status(400).json({ error: 'Nome e telefone são obrigatórios' });
-  }
-  if (name.length > 200 || phone.length > 50 || (message && message.length > 2000)) {
-    return res.status(400).json({ error: 'Campos excedem tamanho máximo' });
-  }
+router.post('/leads', leadLimiter, async (req, res, next) => {
+  try {
+    const { name, phone, niche, caseId, caseName, message } = req.body || {};
+    if (!name || !phone) {
+      return res.status(400).json({ error: 'Nome e telefone são obrigatórios' });
+    }
+    if (name.length > 200 || phone.length > 50 || (message && message.length > 2000)) {
+      return res.status(400).json({ error: 'Campos excedem tamanho máximo' });
+    }
 
-  const lead = db.createLead({
-    name: String(name).trim(),
-    phone: String(phone).trim(),
-    niche: niche ? String(niche).trim() : '',
-    caseId: caseId ? parseInt(caseId, 10) || null : null,
-    caseName: caseName ? String(caseName).trim() : '',
-    message: message ? String(message).trim() : '',
-    ip: req.ip,
-    userAgent: req.headers['user-agent'] || '',
-  });
+    const lead = await db.createLead({
+      name: String(name).trim(),
+      phone: String(phone).trim(),
+      niche: niche ? String(niche).trim() : '',
+      caseId: caseId ? parseInt(caseId, 10) || null : null,
+      caseName: caseName ? String(caseName).trim() : '',
+      message: message ? String(message).trim() : '',
+      ip: req.ip,
+      userAgent: req.headers['user-agent'] || '',
+    });
 
-  // Dispara notificação via API configurada (fire-and-forget)
-  triggerNotification(lead).catch(err => console.warn('Notification error:', err.message));
+    triggerNotification(lead).catch(err => console.warn('Notification error:', err.message));
 
-  res.status(201).json({ ok: true, id: lead.id });
+    res.status(201).json({ ok: true, id: lead.id });
+  } catch (err) { next(err); }
 });
 
 // ─────────────────────────────────────────────
-// GET /api/settings/public — configs visíveis ao frontend público
-// (apenas os campos seguros: hero, WhatsApp, tracking)
+// GET /api/settings/public
 // ─────────────────────────────────────────────
-router.get('/settings/public', (req, res) => {
-  const all = db.getAllSettings();
-  res.json({
-    waPhone:      all.waPhone      || '',
-    waMsg:        all.waMsg        || '',
-    heroTitle:    all.heroTitle    || '',
-    heroSub:      all.heroSub      || '',
-    ga4Id:        all.ga4Id        || '',
-    metaPixelId:  all.metaPixelId  || '',
-    customScript: all.customScript || '',
-  });
+router.get('/settings/public', async (req, res, next) => {
+  try {
+    const all = await db.getAllSettings();
+    res.json({
+      waPhone:      all.waPhone      || '',
+      waMsg:        all.waMsg        || '',
+      heroTitle:    all.heroTitle    || '',
+      heroSub:      all.heroSub      || '',
+      ga4Id:        all.ga4Id        || '',
+      metaPixelId:  all.metaPixelId  || '',
+      customScript: all.customScript || '',
+    });
+  } catch (err) { next(err); }
 });
 
 // ─────────────────────────────────────────────
-// Helper: dispara notificação (WhatsApp via API externa)
+// Notificação externa (fire-and-forget)
 // ─────────────────────────────────────────────
 async function triggerNotification(lead) {
-  const cfg = db.getAllSettings();
+  const cfg = await db.getAllSettings();
   if (!cfg.notifyEnabled || !cfg.notifyApiUrl || !cfg.notifyApiToken || !cfg.notifyDestPhone) return;
 
   const template = cfg.notifyMessage ||
@@ -112,7 +120,6 @@ async function triggerNotification(lead) {
     ...(cfg.notifyChannel ? { channel: cfg.notifyChannel } : {}),
   };
 
-  // Timeout de 8s para não travar o request do lead
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
