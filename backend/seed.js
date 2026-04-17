@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════
-// SEED / MIGRATE — cria schema e popula cases iniciais no Turso
+// SEED / MIGRATE — cria schema e popula cases iniciais (Neon/Postgres)
 // ═══════════════════════════════════════════════════════
 // Uso:   npm run migrate              (popula apenas se tabela estiver vazia)
 // Uso:   npm run migrate:force        (limpa e repopula — CUIDADO)
@@ -24,7 +24,7 @@ async function run() {
 
   if (force && existing > 0) {
     console.log(`⚠️  Limpando ${existing} cases existentes...`);
-    await db.client.execute('DELETE FROM cases');
+    await db.sql(`DELETE FROM cases`);
   }
 
   const jsonPath = path.join(__dirname, 'data', 'initial-cases.json');
@@ -36,28 +36,28 @@ async function run() {
   const cases = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
   console.log(`📦 Importando ${cases.length} cases...`);
 
-  // Batch em lotes de 50 (limite conservador para o Turso)
-  const BATCH = 50;
-  for (let i = 0; i < cases.length; i += BATCH) {
-    const slice = cases.slice(i, i + BATCH);
-    const stmts = slice.map(c => ({
-      sql: `INSERT INTO cases (niche, name, video_url, description, featured)
-            VALUES (?, ?, ?, ?, ?)`,
-      args: [
+  let done = 0;
+  for (const c of cases) {
+    await db.sql(
+      `INSERT INTO cases (niche, name, video_url, description, featured)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
         c.niche,
         c.name,
         c.videoUrl || '',
         c.description || '',
         c.featured ? 1 : 0,
-      ],
-    }));
-    await db.client.batch(stmts, 'write');
-    console.log(`   → ${Math.min(i + BATCH, cases.length)}/${cases.length}`);
+      ]
+    );
+    done++;
+    if (done % 25 === 0 || done === cases.length) {
+      console.log(`   → ${done}/${cases.length}`);
+    }
   }
 
   // Settings padrão (apenas se não existirem)
-  const currentSettings = await db.getAllSettings();
-  if (!currentSettings.waPhone) {
+  const current = await db.getAllSettings();
+  if (!current.waPhone) {
     await db.setManySettings({
       waPhone: '5511999999999',
       waMsg: 'Olá! Vi os cases de sucesso da ITZ e quero saber mais!',

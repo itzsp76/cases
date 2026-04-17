@@ -1,66 +1,68 @@
 // ═══════════════════════════════════════════════════════
-// DB — Turso (libSQL). Mesma API do projeto anterior, agora ASSÍNCRONA.
+// DB — Neon (PostgreSQL serverless). API assíncrona.
 // ═══════════════════════════════════════════════════════
-const { createClient } = require('@libsql/client');
+const { neon } = require('@neondatabase/serverless');
 
-const url = process.env.TURSO_DATABASE_URL;
-const authToken = process.env.TURSO_AUTH_TOKEN;
-
+const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
 if (!url) {
-  throw new Error('TURSO_DATABASE_URL não definido no ambiente');
+  throw new Error('DATABASE_URL não definido no ambiente (Neon/Vercel)');
 }
 
-const client = createClient({ url, authToken });
+// neon() retorna uma função que aceita (sql, params) e retorna rows[].
+const sql = neon(url);
 
 // ═══════════════════════════════════════════════════════
-// SCHEMA + init (idempotente — seguro rodar a cada cold start)
+// SCHEMA (idempotente — roda uma vez via `npm run migrate`,
+// mas também protege cold starts chamando ensureSchema() lazy).
 // ═══════════════════════════════════════════════════════
 let initPromise = null;
 function ensureSchema() {
   if (!initPromise) {
-    initPromise = client.batch([
-      `CREATE TABLE IF NOT EXISTS cases (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        niche       TEXT    NOT NULL,
-        name        TEXT    NOT NULL,
-        video_url   TEXT    NOT NULL,
-        description TEXT    DEFAULT '',
-        featured    INTEGER DEFAULT 0,
-        views       INTEGER DEFAULT 0,
-        created_at  TEXT    DEFAULT (datetime('now')),
-        updated_at  TEXT    DEFAULT (datetime('now'))
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_cases_niche    ON cases(niche)`,
-      `CREATE INDEX IF NOT EXISTS idx_cases_featured ON cases(featured)`,
-      `CREATE TABLE IF NOT EXISTS leads (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        name       TEXT    NOT NULL,
-        phone      TEXT    NOT NULL,
-        niche      TEXT    DEFAULT '',
-        case_id    INTEGER,
-        case_name  TEXT    DEFAULT '',
-        message    TEXT    DEFAULT '',
-        ip         TEXT    DEFAULT '',
-        user_agent TEXT    DEFAULT '',
-        created_at TEXT    DEFAULT (datetime('now')),
-        FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE SET NULL
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_leads_created ON leads(created_at)`,
-      `CREATE TABLE IF NOT EXISTS settings (
-        key   TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )`,
-    ], 'write').catch(err => { initPromise = null; throw err; });
+    initPromise = (async () => {
+      await sql(`
+        CREATE TABLE IF NOT EXISTS cases (
+          id          SERIAL PRIMARY KEY,
+          niche       TEXT NOT NULL,
+          name        TEXT NOT NULL,
+          video_url   TEXT NOT NULL,
+          description TEXT DEFAULT '',
+          featured    INTEGER DEFAULT 0,
+          views       INTEGER DEFAULT 0,
+          created_at  TIMESTAMPTZ DEFAULT NOW(),
+          updated_at  TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+      await sql(`CREATE INDEX IF NOT EXISTS idx_cases_niche    ON cases(niche)`);
+      await sql(`CREATE INDEX IF NOT EXISTS idx_cases_featured ON cases(featured)`);
+      await sql(`
+        CREATE TABLE IF NOT EXISTS leads (
+          id         SERIAL PRIMARY KEY,
+          name       TEXT NOT NULL,
+          phone      TEXT NOT NULL,
+          niche      TEXT DEFAULT '',
+          case_id    INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+          case_name  TEXT DEFAULT '',
+          message    TEXT DEFAULT '',
+          ip         TEXT DEFAULT '',
+          user_agent TEXT DEFAULT '',
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+      await sql(`CREATE INDEX IF NOT EXISTS idx_leads_created ON leads(created_at)`);
+      await sql(`
+        CREATE TABLE IF NOT EXISTS settings (
+          key   TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )
+      `);
+    })().catch(err => { initPromise = null; throw err; });
   }
   return initPromise;
 }
 
-// ═══════════════════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════════════════
-async function exec(sql, args) {
+async function query(text, params) {
   await ensureSchema();
-  return client.execute(args !== undefined ? { sql, args } : sql);
+  return params !== undefined ? sql(text, params) : sql(text);
 }
 
 function normalizeCase(row) {
@@ -72,7 +74,7 @@ function normalizeCase(row) {
     description: row.description,
     featured: !!row.featured,
     views: row.views,
-    createdAt: row.created_at,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
   };
 }
 
@@ -80,7 +82,7 @@ function normalizeCase(row) {
 // CASES
 // ═══════════════════════════════════════════════════════
 async function listCases() {
-  const { rows } = await exec(
+  const rows = await query(
     `SELECT id, niche, name, video_url, description, featured, views, created_at
      FROM cases ORDER BY featured DESC, niche ASC, name ASC`
   );
@@ -88,18 +90,19 @@ async function listCases() {
 }
 
 async function getCase(id) {
-  const { rows } = await exec(
+  const rows = await query(
     `SELECT id, niche, name, video_url, description, featured, views, created_at
-     FROM cases WHERE id = ?`,
+     FROM cases WHERE id = $1`,
     [id]
   );
   return rows[0] ? normalizeCase(rows[0]) : null;
 }
 
 async function createCase(data) {
-  const result = await exec(
+  const rows = await query(
     `INSERT INTO cases (niche, name, video_url, description, featured)
-     VALUES (?, ?, ?, ?, ?)`,
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, niche, name, video_url, description, featured, views, created_at`,
     [
       data.niche,
       data.name,
@@ -108,16 +111,16 @@ async function createCase(data) {
       data.featured ? 1 : 0,
     ]
   );
-  const id = Number(result.lastInsertRowid);
-  return getCase(id);
+  return normalizeCase(rows[0]);
 }
 
 async function updateCase(id, data) {
-  await exec(
+  const rows = await query(
     `UPDATE cases SET
-       niche = ?, name = ?, video_url = ?, description = ?,
-       featured = ?, updated_at = datetime('now')
-     WHERE id = ?`,
+       niche = $1, name = $2, video_url = $3, description = $4,
+       featured = $5, updated_at = NOW()
+     WHERE id = $6
+     RETURNING id, niche, name, video_url, description, featured, views, created_at`,
     [
       data.niche,
       data.name,
@@ -127,42 +130,42 @@ async function updateCase(id, data) {
       id,
     ]
   );
-  return getCase(id);
+  return rows[0] ? normalizeCase(rows[0]) : null;
 }
 
 async function deleteCase(id) {
-  const res = await exec(`DELETE FROM cases WHERE id = ?`, [id]);
-  return res.rowsAffected > 0;
+  const rows = await query(`DELETE FROM cases WHERE id = $1 RETURNING id`, [id]);
+  return rows.length > 0;
 }
 
 async function incrementViews(id) {
-  const res = await exec(`UPDATE cases SET views = views + 1 WHERE id = ?`, [id]);
-  return res.rowsAffected > 0;
+  const rows = await query(
+    `UPDATE cases SET views = views + 1 WHERE id = $1 RETURNING id`,
+    [id]
+  );
+  return rows.length > 0;
 }
 
 async function countCases() {
-  const { rows } = await exec(`SELECT COUNT(*) AS total FROM cases`);
-  return Number(rows[0].total);
+  const rows = await query(`SELECT COUNT(*)::int AS total FROM cases`);
+  return rows[0].total;
 }
 
 async function getAnalytics() {
   await ensureSchema();
-  const [a, b, c, d, e] = await client.batch(
-    [
-      `SELECT COUNT(*) AS total FROM cases`,
-      `SELECT COUNT(DISTINCT niche) AS total FROM cases`,
-      `SELECT COALESCE(SUM(views), 0) AS total FROM cases`,
-      `SELECT COUNT(*) AS total FROM leads`,
-      `SELECT id, niche, name, views FROM cases ORDER BY views DESC LIMIT 10`,
-    ],
-    'read'
-  );
+  const [a, b, c, d, top] = await Promise.all([
+    sql(`SELECT COUNT(*)::int AS total FROM cases`),
+    sql(`SELECT COUNT(DISTINCT niche)::int AS total FROM cases`),
+    sql(`SELECT COALESCE(SUM(views), 0)::int AS total FROM cases`),
+    sql(`SELECT COUNT(*)::int AS total FROM leads`),
+    sql(`SELECT id, niche, name, views FROM cases ORDER BY views DESC LIMIT 10`),
+  ]);
   return {
-    totalCases:  Number(a.rows[0].total),
-    totalNiches: Number(b.rows[0].total),
-    totalViews:  Number(c.rows[0].total),
-    totalLeads:  Number(d.rows[0].total),
-    topCases:    e.rows.map(r => ({ id: r.id, niche: r.niche, name: r.name, views: r.views })),
+    totalCases:  a[0].total,
+    totalNiches: b[0].total,
+    totalViews:  c[0].total,
+    totalLeads:  d[0].total,
+    topCases:    top.map(r => ({ id: r.id, niche: r.niche, name: r.name, views: r.views })),
   };
 }
 
@@ -170,9 +173,10 @@ async function getAnalytics() {
 // LEADS
 // ═══════════════════════════════════════════════════════
 async function createLead(data) {
-  const res = await exec(
+  const rows = await query(
     `INSERT INTO leads (name, phone, niche, case_id, case_name, message, ip, user_agent)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id`,
     [
       data.name,
       data.phone,
@@ -184,25 +188,22 @@ async function createLead(data) {
       data.userAgent || '',
     ]
   );
-  return { id: Number(res.lastInsertRowid), ...data };
+  return { id: rows[0].id, ...data };
 }
 
 async function listLeads({ limit = 200, offset = 0 } = {}) {
   await ensureSchema();
-  const [countRes, itemsRes] = await client.batch(
-    [
-      { sql: `SELECT COUNT(*) AS total FROM leads`, args: [] },
-      {
-        sql: `SELECT id, name, phone, niche, case_id, case_name, message, created_at
-              FROM leads ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-        args: [limit, offset],
-      },
-    ],
-    'read'
-  );
+  const [countRes, items] = await Promise.all([
+    sql(`SELECT COUNT(*)::int AS total FROM leads`),
+    sql(
+      `SELECT id, name, phone, niche, case_id, case_name, message, created_at
+       FROM leads ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    ),
+  ]);
   return {
-    total: Number(countRes.rows[0].total),
-    items: itemsRes.rows.map(r => ({
+    total: countRes[0].total,
+    items: items.map(r => ({
       id: r.id,
       name: r.name,
       phone: r.phone,
@@ -210,21 +211,21 @@ async function listLeads({ limit = 200, offset = 0 } = {}) {
       caseId: r.case_id,
       caseName: r.case_name,
       message: r.message,
-      createdAt: r.created_at,
+      createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at,
     })),
   };
 }
 
 async function clearLeads() {
-  const res = await exec(`DELETE FROM leads`);
-  return res.rowsAffected;
+  const rows = await query(`DELETE FROM leads RETURNING id`);
+  return rows.length;
 }
 
 // ═══════════════════════════════════════════════════════
-// SETTINGS (valores armazenados como JSON)
+// SETTINGS (values stored as JSON strings)
 // ═══════════════════════════════════════════════════════
 async function getAllSettings() {
-  const { rows } = await exec(`SELECT key, value FROM settings`);
+  const rows = await query(`SELECT key, value FROM settings`);
   const out = {};
   for (const row of rows) {
     try { out[row.key] = JSON.parse(row.value); }
@@ -234,33 +235,34 @@ async function getAllSettings() {
 }
 
 async function getSetting(key, defaultValue = null) {
-  const { rows } = await exec(`SELECT value FROM settings WHERE key = ?`, [key]);
+  const rows = await query(`SELECT value FROM settings WHERE key = $1`, [key]);
   if (!rows[0]) return defaultValue;
   try { return JSON.parse(rows[0].value); }
   catch { return rows[0].value; }
 }
 
 async function setSetting(key, value) {
-  const json = JSON.stringify(value);
-  await exec(
-    `INSERT INTO settings (key, value) VALUES (?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-    [key, json]
+  await query(
+    `INSERT INTO settings (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    [key, JSON.stringify(value)]
   );
 }
 
 async function setManySettings(obj) {
   await ensureSchema();
-  const stmts = Object.entries(obj).map(([k, v]) => ({
-    sql: `INSERT INTO settings (key, value) VALUES (?, ?)
-          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-    args: [k, JSON.stringify(v)],
-  }));
-  if (stmts.length) await client.batch(stmts, 'write');
+  for (const [k, v] of Object.entries(obj)) {
+    await sql(
+      `INSERT INTO settings (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [k, JSON.stringify(v)]
+    );
+  }
 }
 
 module.exports = {
-  client,
+  sql,
+  query,
   ensureSchema,
   listCases,
   getCase,
