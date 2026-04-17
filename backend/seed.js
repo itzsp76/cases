@@ -4,9 +4,9 @@
 // Uso:   npm run migrate              (popula apenas se tabela estiver vazia)
 // Uso:   npm run migrate:force        (limpa e repopula — CUIDADO)
 // ═══════════════════════════════════════════════════════
-require('dotenv').config();
-const fs = require('fs');
 const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+const fs = require('fs');
 const db = require('./db');
 
 const force = process.argv.includes('--force');

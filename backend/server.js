@@ -1,10 +1,10 @@
 // ═══════════════════════════════════════════════════════
 // ITZ Cases — Express app (exporta app; Vercel monta como handler)
 // ═══════════════════════════════════════════════════════
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 const rateLimit = require('express-rate-limit');
 
 const authRoutes = require('./routes/auth');
