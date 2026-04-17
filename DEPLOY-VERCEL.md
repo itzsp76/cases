@@ -1,39 +1,60 @@
-# Deploy na Vercel + Neon
+# Deploy na Vercel + Supabase
 
-Guia passo-a-passo para ativar o ITZ Cases na Vercel usando **Neon** (PostgreSQL serverless).
-A integração Neon é nativa da Vercel — zero CLI, tudo pelo dashboard.
-
----
-
-## 1. Conectar Neon à Vercel (1 clique)
-
-1. Entre em https://vercel.com no projeto `cases` (já deployado).
-2. Aba **Storage** → **Create Database** → escolha **Neon — Serverless Postgres**.
-   - *Ou:* **Integrations** → **Browse Marketplace** → **Neon** → **Add Integration**.
-3. Aceite / crie conta Neon (pode logar com o mesmo GitHub).
-4. Região: escolha **us-east** ou a mais próxima de você (Neon não tem São Paulo ainda).
-5. Plano: **Free** é suficiente (0.5 GB, 190 compute-hours/mês).
-6. **Connect to Project** → selecione `cases` → Connect.
-
-A integração injeta automaticamente estas env vars no projeto:
-`DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `POSTGRES_URL`, `POSTGRES_URL_NON_POOLING`, `POSTGRES_HOST`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DATABASE` etc.
-
-Nosso código usa `DATABASE_URL` → já está pronto.
+Guia passo-a-passo para ativar o ITZ Cases na Vercel com **Supabase** (Postgres gerenciado).
 
 ---
 
-## 2. Adicionar as outras env vars
+## 1. Criar projeto no Supabase
 
-Em **Project → Settings → Environment Variables** → **Production + Preview + Development**:
+1. Acesse https://supabase.com → **Start your project** → login com GitHub.
+2. **New Project**:
+   - **Name:** `itz-cases`
+   - **Database Password:** crie uma senha forte e **anote** (vai precisar depois)
+   - **Region:** `South America (São Paulo)` ou `East US` (mais próximas)
+   - **Pricing:** Free
+3. Clique **Create new project** — leva ~2 min para provisionar.
+
+---
+
+## 2. Conectar Supabase ao projeto Vercel
+
+### Opção A — Integração Marketplace (recomendada)
+
+1. Na Vercel, abra o projeto `cases` → aba **Integrations** → **Browse Marketplace**.
+2. Busque **Supabase** → **Add Integration**.
+3. Autorize a conta, selecione o projeto Supabase `itz-cases` e o projeto Vercel `cases`.
+4. Marque **Production + Preview + Development** → **Link Projects**.
+
+A integração injeta automaticamente no projeto Vercel:
+- `POSTGRES_URL`
+- `POSTGRES_PRISMA_URL`
+- `POSTGRES_URL_NON_POOLING`
+- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_DATABASE`
+- `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+
+Nosso código lê `DATABASE_URL || POSTGRES_URL` — já está pronto.
+
+### Opção B — Manual (se não quiser usar o Marketplace)
+
+1. No Supabase → **Project Settings** → **Database** → **Connection string** → aba **URI**.
+2. Marque **Use connection pooling** → **Mode: Transaction** (porta 6543).
+3. Copie a string e troque `[YOUR-PASSWORD]` pela senha do passo 1.
+4. Cole essa string na Vercel em **Settings → Environment Variables** como `DATABASE_URL` (Production + Preview + Development).
+
+---
+
+## 3. Adicionar as outras env vars na Vercel
+
+Em **Project → Settings → Environment Variables** (todas em Production + Preview + Development):
 
 | Nome | Valor |
 |------|-------|
-| `JWT_SECRET` | string aleatória de 64 bytes (veja "como gerar" abaixo) |
-| `ADMIN_USER` | `admin` (ou o nome que preferir) |
-| `ADMIN_PASS_HASH` | hash bcrypt da senha (veja "como gerar") |
+| `JWT_SECRET` | string aleatória de 64 bytes (veja abaixo) |
+| `ADMIN_USER` | `admin` |
+| `ADMIN_PASS_HASH` | hash bcrypt da senha admin (veja abaixo) |
 | `JWT_EXPIRY` | `24h` |
 | `NODE_ENV` | `production` |
-| `CORS_ORIGIN` | o domínio Vercel — ex: `https://cases-mocha.vercel.app` |
+| `CORS_ORIGIN` | o domínio da Vercel — ex: `https://cases-mocha.vercel.app` |
 
 ### Como gerar JWT_SECRET
 ```bash
@@ -44,24 +65,23 @@ node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 ```bash
 node -e "console.log(require('bcryptjs').hashSync('SUA_SENHA_AQUI',12))"
 ```
-(troque `SUA_SENHA_AQUI` pela senha real)
 
 ---
 
-## 3. Popular banco com os 115 cases
+## 4. Popular banco com os 115 cases
 
-Você precisa rodar o seed **uma vez**, apontando do seu computador para o Neon.
+Você precisa rodar o seed **uma vez**, do seu computador apontando para o Supabase.
 
-1. No dashboard Neon (ou na aba **Storage → Neon** da Vercel), copie a **Pooled connection string** (`DATABASE_URL`).
+1. No Supabase → **Project Settings** → **Database** → **Connection string** → **URI** com **Transaction pooler** (porta 6543). Copie e troque `[YOUR-PASSWORD]`.
 2. Na raiz do projeto local:
    ```bash
    cp backend/.env.example backend/.env
    ```
 3. Edite `backend/.env` e cole apenas:
    ```
-   DATABASE_URL=postgresql://user:pass@xxx.neon.tech/neondb?sslmode=require
+   DATABASE_URL=postgresql://postgres.xxxxx:SENHA@aws-0-sa-east-1.pooler.supabase.com:6543/postgres
    ```
-4. Instale e rode o seed:
+4. Instale deps e rode o seed:
    ```bash
    npm install
    npm run migrate
@@ -76,37 +96,37 @@ Para limpar e repopular: `npm run migrate:force`.
 
 ---
 
-## 4. Redeploy
+## 5. Redeploy
 
-Após adicionar as env vars (passo 2), clique em **Redeploy** no último deploy (aba **Deployments** → `...` → Redeploy).
+Após configurar as env vars no passo 3, vá em **Deployments** → último deploy → `...` → **Redeploy**.
 
-Ou simplesmente faça um novo commit que a Vercel refaz.
-
----
-
-## 5. Validar
-
-- `https://cases-mocha.vercel.app/api/health` → deve retornar `{"status":"ok",...}`
-- `https://cases-mocha.vercel.app` → frontend carrega
-- Lista de cases vem do Neon
+Ou simplesmente faça um novo commit que a Vercel refaz automaticamente.
 
 ---
 
-## 6. Testar local (opcional)
+## 6. Validar
+
+- `https://cases-mocha.vercel.app/api/health` → `{"status":"ok",...}`
+- `https://cases-mocha.vercel.app` → frontend carrega lista de cases
+- Login admin funciona com `ADMIN_USER` / senha que você escolheu
+
+---
+
+## 7. Dev local
 
 ```bash
 npm run dev
 ```
+Roda em `http://localhost:3001` apontando para o mesmo banco Supabase de produção.
 
-Abre em `http://localhost:3001` apontando para o Neon (mesmo banco de produção).
-
-Se quiser banco separado para dev, crie um segundo database no Neon e aponte o `DATABASE_URL` do `.env` local para ele.
+Para isolar dev de prod, crie um segundo projeto Supabase e use seu `DATABASE_URL` no `.env` local.
 
 ---
 
 ## Notas
 
-- **Rate-limit** (`express-rate-limit` in-memory) é imperfeito em serverless — cada lambda tem seu próprio contador. Para proteção real use **Vercel WAF** ou Upstash Redis.
-- **Cold start**: ~300-600ms quando a função fica ociosa. Neon HTTP driver é leve.
-- **Trocar senha admin**: POST para `/api/admin/password/generate-hash` com `{password: "novaSenha"}` → pegar o hash → atualizar `ADMIN_PASS_HASH` nas env vars da Vercel → Redeploy.
-- **Backup**: Neon free já tem branches / point-in-time restore (7 dias). Para export manual: use `pg_dump` com a connection string.
+- **Pooler vs conexão direta**: use sempre a **Transaction pooler** (porta 6543) em serverless. A conexão direta (5432) gastaria limite de conexões e falharia em cold starts paralelos.
+- **`prepare: false`**: o driver já vem configurado para isso no `db.js` (necessário com PgBouncer transaction mode).
+- **Rate-limit** (`express-rate-limit` in-memory) é imperfeito em serverless — cada lambda tem seu próprio contador. Para proteção real, use **Vercel WAF** ou Upstash Redis.
+- **Trocar senha admin**: POST `/api/admin/password/generate-hash` com `{password: "nova"}` → copie o hash retornado → atualize `ADMIN_PASS_HASH` nas env vars → Redeploy.
+- **Backup**: Supabase free já faz backups diários automáticos (retenção de 7 dias).

@@ -1,15 +1,33 @@
 // ═══════════════════════════════════════════════════════
-// DB — Neon (PostgreSQL serverless). API assíncrona.
+// DB — Postgres (Supabase / Neon / Vercel Postgres). Driver `postgres`
+// (porsager) — funciona com qualquer provedor Postgres em serverless.
 // ═══════════════════════════════════════════════════════
-const { neon } = require('@neondatabase/serverless');
+const postgres = require('postgres');
 
-const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+const url =
+  process.env.DATABASE_URL ||
+  process.env.POSTGRES_URL ||
+  process.env.POSTGRES_PRISMA_URL;
+
 if (!url) {
-  throw new Error('DATABASE_URL não definido no ambiente (Neon/Vercel)');
+  throw new Error('DATABASE_URL (ou POSTGRES_URL) não definido no ambiente');
 }
 
-// neon() retorna uma função que aceita (sql, params) e retorna rows[].
-const sql = neon(url);
+// Config para serverless + connection pooler (Supabase porta 6543 / PgBouncer
+// em transaction mode): desabilita prepared statements.
+const client = postgres(url, {
+  ssl: 'require',
+  prepare: false,
+  max: 1,                 // serverless: 1 conexão por invocação
+  idle_timeout: 20,
+  connect_timeout: 10,
+});
+
+// Helper com assinatura `sql(text, params)` — retorna rows[].
+async function sql(text, params) {
+  const res = await client.unsafe(text, params || []);
+  return res;
+}
 
 // ═══════════════════════════════════════════════════════
 // SCHEMA (idempotente — roda uma vez via `npm run migrate`,
